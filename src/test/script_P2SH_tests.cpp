@@ -17,6 +17,25 @@
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
+#include <err.h>
+#include "../script/standard.h"
+#include "../script/script.h"
+#include "test_bitcoin.h"
+#include "../utiltime.h"
+#include "../policy/policy.h"
+#include "../amount.h"
+#include "../primitives/transaction.h"
+#include "../pubkey.h"
+#include "../key.h"
+#include "../keystore.h"
+#include "../script/interpreter.h"
+#include "../sync.h"
+#include "../validation.h"
+#include "../script/ismine.h"
+#include "../script/sign.h"
+#include "../base58.h"
+#include "../uint256.h"
+#include "../script/script_error.h"
 
 // Helpers:
 static std::vector<unsigned char>
@@ -47,6 +66,93 @@ Verify(const CScript& scriptSig, const CScript& scriptPubKey, bool fStrict, Scri
 
 
 BOOST_FIXTURE_TEST_SUITE(script_P2SH_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(checklocktimeverify)
+{
+    //Make two keys and add them to a keystore
+    CBasicKeyStore keystore;
+    CKey key1;
+    key1.MakeNewKey(true);
+    keystore.AddKey(key1);
+    CPubKey pubkey1 = key1.GetPubKey();
+    CKey key2;
+    key2.MakeNewKey(true);
+    keystore.AddKey(key2);
+    CPubKey pubkey2 = key2.GetPubKey();
+
+    unsigned int nUnlockTime = GetTime() + (60*60); // the time that key2 will be able to create a valid spend
+    std::cout << "unlock time: " << nUnlockTime << "\n";
+    CScript scriptRedeem;
+    scriptRedeem << OP_IF << ToByteVector(pubkey1) << OP_CHECKSIGVERIFY << OP_ELSE << CScriptNum(nUnlockTime) << OP_CHECKLOCKTIMEVERIFY << OP_DROP << OP_ENDIF << ToByteVector(pubkey2) << OP_CHECKSIG;
+
+    CScript scriptHash;
+    scriptHash << OP_HASH160 << ToByteVector(CScriptID(scriptRedeem)) << OP_EQUAL;
+
+    std::vector<std::vector<unsigned char> > solutions;
+    txnouttype whichType;
+    BOOST_CHECK(Solver(scriptHash, whichType, solutions));
+    BOOST_CHECK_EQUAL(whichType, TX_SCRIPTHASH);
+    BOOST_CHECK_EQUAL(solutions.size(), 1);
+    BOOST_CHECK(solutions[0] == ToByteVector(CScriptID(scriptRedeem)));
+    BOOST_CHECK_MESSAGE(scriptHash.IsPayToScriptHash(), "script is not p2sh");
+
+    //Create a funding tx with a CLTV UTXO
+    CMutableTransaction txFrom;
+    CAmount amount = 1000;
+    CTxOut out(amount, scriptHash);
+    txFrom.vout.emplace_back(out);
+
+    std::string reason;
+    BOOST_CHECK_MESSAGE(IsStandardTx(txFrom, reason), "funding transaction is not standard");
+
+    //Make a tx that spends the UTXO from key1 (valid to spend at all times)
+    CMutableTransaction txTo;
+    txTo.vin.resize(1);
+    txTo.vout.resize(1);
+    txTo.vin[0].prevout.n = 0;
+    txTo.vin[0].prevout.hash = txFrom.GetHash();
+    txTo.vout[0].nValue = amount;
+    txTo.nLockTime = GetTime();
+    unsigned int nSequence = 0;
+    nSequence = ~nSequence;
+    nSequence -= 1;
+    txTo.vin[0].nSequence = nSequence;
+    std::cout << "nseq: " << txTo.vin[0].nSequence << "\n";
+
+    //Sign the tx with key1
+    PrecomputedTransactionData txdata(txTo);
+    uint256 hash = SignatureHash(scriptRedeem, txTo, 0, SIGHASH_ALL, amount, SIGVERSION_BASE, &txdata);
+    std::vector<unsigned char> vchSig;
+    BOOST_CHECK(key1.Sign(hash, vchSig));
+    vchSig.push_back((unsigned char)SIGHASH_ALL);
+    std::cout << "pubkey1: " << pubkey1.GetHash().GetHex() << " hash=" << hash.GetHex() << "\n";
+    BOOST_CHECK_MESSAGE(pubkey1.Verify(hash, vchSig), "failed to verify sig");
+
+    //Create scriptSig which adds the signature + the original redeem script
+    CScript scriptSig;
+    scriptSig << vchSig << OP_1 << Serialize(scriptRedeem);
+
+    //Check that the scriptSig actually unlocks the locked UTXO
+    ScriptError serror;
+    unsigned int flags = SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY | SCRIPT_VERIFY_P2SH;// | SCRIPT_VERIFY_STRICTENC;
+    std::cout << "before verifyscript\n";
+    bool fVerifyScript = VerifyScript(scriptSig, scriptRedeem, nullptr, SCRIPT_VERIFY_P2SH, MutableTransactionSignatureChecker(&txTo, 0, amount), &serror);
+    BOOST_CHECK_MESSAGE(fVerifyScript, ScriptErrorString(serror));
+    std::cout << "after verifyscript\n";
+
+    bool sigOK = CScriptCheck(txFrom.vout[0], txTo, 0, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_STRICTENC, false, &txdata)();
+    BOOST_CHECK_MESSAGE(sigOK, "sig not ok");
+
+    //Try spending using key2 which should not work yet
+    uint256 hash2 = SignatureHash(scriptHash, txTo, 0, SIGHASH_ALL, amount, SIGVERSION_BASE);
+    std::vector<unsigned char> vchSig2;
+    BOOST_CHECK_MESSAGE(key2.Sign(hash2, vchSig2), "failed to sign with key2");
+
+    CScript scriptSig2;
+    scriptSig2 << ToByteVector(vchSig2) << OP_1 << Serialize(scriptRedeem);
+    fVerifyScript = VerifyScript(scriptSig2, scriptHash, nullptr, flags, MutableTransactionSignatureChecker(&txTo, 0, amount), &serror);
+    BOOST_CHECK_MESSAGE(!fVerifyScript, "scriptSig was valid even though key2 is not within the time range");
+}
 
 BOOST_AUTO_TEST_CASE(sign)
 {

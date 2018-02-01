@@ -11,6 +11,9 @@
 #include <pubkey.h>
 #include <script/script.h>
 #include <uint256.h>
+#include <iostream>
+#include "../utilstrencodings.h"
+#include "../tinyformat.h"
 
 typedef std::vector<unsigned char> valtype;
 
@@ -352,6 +355,7 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
 
                 case OP_CHECKLOCKTIMEVERIFY:
                 {
+                    std::cout << __func__ << "356\n";
                     if (!(flags & SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY)) {
                         // not enabled; treat as a NOP2
                         break;
@@ -711,8 +715,11 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 //case OP_NOTEQUAL: // use OP_NUMNOTEQUAL
                 {
                     // (x1 x2 - bool)
-                    if (stack.size() < 2)
+                    if (stack.size() < 2){
+                        std::cout << "719\n";
                         return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+                    }
+
                     valtype& vch1 = stacktop(-2);
                     valtype& vch2 = stacktop(-1);
                     bool fEqual = (vch1 == vch2);
@@ -878,8 +885,11 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 case OP_CHECKSIGVERIFY:
                 {
                     // (sig pubkey -- bool)
-                    if (stack.size() < 2)
+                    if (stack.size() < 2) {
+                        std::cout << "889\n";
                         return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+                    }
+
 
                     valtype& vchSig    = stacktop(-2);
                     valtype& vchPubKey = stacktop(-1);
@@ -1253,26 +1263,35 @@ bool TransactionSignatureChecker::VerifySignature(const std::vector<unsigned cha
 bool TransactionSignatureChecker::CheckSig(const std::vector<unsigned char>& vchSigIn, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const
 {
     CPubKey pubkey(vchPubKey);
-    if (!pubkey.IsValid())
+    if (!pubkey.IsValid()) {
+        //std::cout << "pubkey not valid\n";
         return false;
+    }
 
     // Hash type is one byte tacked on to the end of the signature
     std::vector<unsigned char> vchSig(vchSigIn);
-    if (vchSig.empty())
+    if (vchSig.empty()) {
+        //std::cout << "vchSig empty\n";
         return false;
+    }
+
     int nHashType = vchSig.back();
     vchSig.pop_back();
 
     uint256 sighash = SignatureHash(scriptCode, *txTo, nIn, nHashType, amount, sigversion, this->txdata);
 
-    if (!VerifySignature(vchSig, pubkey, sighash))
+    if (!VerifySignature(vchSig, pubkey, sighash)) {
+        std::string str = strprintf("%s pubkey=%s hash=%s nIn=%d nHashType=%d amount=%d sigversion=%d\n", __func__, pubkey.GetHash().GetHex(), sighash.GetHex(),nIn, nHashType, amount, sigversion);
+        std::cout << str;
         return false;
+    }
 
     return true;
 }
 
 bool TransactionSignatureChecker::CheckLockTime(const CScriptNum& nLockTime) const
 {
+    std::cout << __func__ << " nLockTime=" << nLockTime.getint() << "\n";
     // There are two kinds of nLockTime: lock-by-blockheight
     // and lock-by-blocktime, distinguished by whether
     // nLockTime < LOCKTIME_THRESHOLD.
